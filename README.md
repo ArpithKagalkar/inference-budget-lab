@@ -11,7 +11,8 @@ A working local experiment workbench with a dependency-free Python backend, brow
 Requires Python 3.10+ and a modern browser. No packages or API keys are needed for simulation.
 
 ```powershell
-cd C:\Users\Arpith\Desktop\Projects\inference-budget-lab
+git clone https://github.com/ArpithKagalkar/inference-budget-lab.git
+cd inference-budget-lab
 python -m lab.server
 ```
 
