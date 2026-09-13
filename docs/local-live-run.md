@@ -14,6 +14,22 @@ Both models are installed. Start the live-configured dashboard from the reposito
 .\start-ollama-lab.ps1
 ```
 
+For the Bitext intent benchmark, enable Ollama's native structured-output path explicitly:
+
+```powershell
+$env:ECONOMY_BASE_URL='http://127.0.0.1:11434/v1'
+$env:ECONOMY_MODEL='qwen3:0.6b'
+$env:ECONOMY_HOURLY_COST='1'
+$env:ECONOMY_OLLAMA_THINK='false'
+$env:STRONG_BASE_URL='http://127.0.0.1:11434/v1'
+$env:STRONG_MODEL='qwen3:4b'
+$env:STRONG_HOURLY_COST='1'
+$env:STRONG_OLLAMA_THINK='false'
+python -m inferenceops.experiments.intent_benchmark --validation 10 --test 10 --max-output-tokens 80
+```
+
+The `*_OLLAMA_THINK` settings are only sent to Ollama's native API. Hosted OpenAI-compatible providers continue to receive the standard structured-output request.
+
 Open `http://127.0.0.1:8787`, choose **Live endpoints**, and begin with:
 
 - Validation requests: 30

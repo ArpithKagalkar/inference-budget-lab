@@ -1,14 +1,18 @@
-# Inference Budget Lab
+# InferenceOps
 
 [![CI](https://github.com/ArpithKagalkar/inference-budget-lab/actions/workflows/ci.yml/badge.svg)](https://github.com/ArpithKagalkar/inference-budget-lab/actions/workflows/ci.yml)
 
-**Find the cheapest LLM routing policy that meets a quality floor and a p95 latency SLO.**
+**An evidence-first AI FinOps agent that finds inference waste, tests safer alternatives, and prepares a verified draft change.**
 
-A working local experiment workbench with a dependency-free Python backend, browser dashboard, SQLite experiment history, deterministic load simulation, and an OpenAI-compatible live provider adapter. Built around structured support-ticket extraction, where outputs can be scored against known labels.
+```text
+Traces → Cost audit → Opportunity → Guarded experiment → PR preview → Draft PR → Staged notification
+```
 
-## Run it
+The original Inference Budget Lab remains the evaluation engine. It compares strong-only, economy-only, and adaptive policies under quality and p95 latency constraints. InferenceOps adds production-shaped traces, opportunity detection, durable workflow states, provider budget controls, and restricted external actions.
 
-Requires Python 3.10+ and a modern browser. No packages or API keys are needed for simulation.
+## Run locally
+
+Requires Python 3.10+ and a modern browser. Simulation and the demo workspace need no API key or package installation.
 
 ```powershell
 git clone https://github.com/ArpithKagalkar/inference-budget-lab.git
@@ -16,130 +20,97 @@ cd inference-budget-lab
 python -m lab.server
 ```
 
-Open **http://127.0.0.1:8787**. Set constraints and click **Run experiment**. The service binds to loopback only. Stop with Ctrl+C. `--port 8788` selects another port.
+Open **http://127.0.0.1:8787**, then select **Load demo workspace**. The demo imports 900 explicitly synthetic traces and detects premium-model overuse, repeated system prompts, and excessive RAG context. Only the model-routing finding can start an automated V1 experiment.
+
+## Verify
 
 ```powershell
-# Reproducible command-line benchmark
-python -m lab.benchmark --requests 160 --seed 42 --rps 4 --concurrency 8 --quality-min 0.9 --latency-slo-ms 1800
-
-# Pressure test: burst arrivals and a narrow worker pool
-python -m lab.benchmark --traffic burst --rps 12 --concurrency 2 --output outputs/burst.json
-
-# Unit tests plus a local mock HTTP provider (no paid calls)
 python -m unittest discover -s tests -v
+node --check web/app.js
+python -m lab.benchmark --requests 160 --seed 42 --rps 4 --concurrency 8
 ```
 
-## What works
+## Public evaluation data
 
-- Three policies: always strong, always economy, and a threshold-based adaptive router.
-- Validation-only threshold selection, followed by held-out test evaluation.
-- Minimum exact-match quality and p95 end-to-end latency constraints.
-- Point estimates and 95% Wilson quality intervals, schema validity, field accuracy, and quality by difficulty.
-- Token cost per 1,000 submitted requests, cost per correct response, tail latency, queueing, throughput, errors, and violation rate.
-- Poisson arrivals and a 4× middle-of-run burst, with bounded client concurrency.
-- Cost–quality chart with confidence intervals and latency failures, request-level prediction inspection, JSON/CSV export.
-- Persistent SQLite history, background runs, reload recovery, input validation, and cross-origin POST rejection.
-- Live calls to two configurable OpenAI-compatible endpoints. Provider usage, failures, and incomplete accounting remain visible.
-
-## What the simulator actually proves
-
-Simulation demonstrates the benchmark, routing, queueing, and decision machinery. **It does not measure an LLM or prove model cost savings.** All synthetic results are labeled in the UI and exports.
-
-The fixtures contain `product`, `category`, and `urgency`. Quality is exact match across all three; invalid schemas fail. The simulator starts from expected labels and introduces seeded category errors. Strong-model correctness is 98.5%; economy correctness is 98%, 79%, or 47% for easy, medium, or hard text features. The routing heuristic intentionally aligns with the simulated difficulty: this is a controllable teaching model, not learned evidence.
-
-The live prompt contains the same explicit category rubric used by the fixture generator: charges/invoices are billing, authentication is access, slowness is performance, and broken output or controls are bugs. Prompt versions are saved with results so prompt changes cannot be silently mixed in one comparison.
-
-Illustrative input/output prices per million tokens are $0.15/$0.60 for economy and $2.50/$10.00 for strong. Token counts use character estimates. Service times use seeded lognormal variation and model-specific coefficients. A shared FIFO worker pool simulates client queueing. There is no real GPU scheduling, continuous batching, quantization, prefix cache, or TTFT measurement.
-
-## Experiment protocol
-
-1. Generate 120 validation fixtures and a separate test split using a saved seed.
-2. Evaluate thresholds `0`, `0.2`, `0.6`, `1`. Route to economy when text difficulty is at most the threshold; otherwise strong.
-3. Select the cheapest validation candidate with quality ≥ floor and p95 ≤ SLO. Complete cost accounting is required. If none qualifies, show strong-only as an explicitly unaccepted fallback.
-4. Freeze the threshold. Run the three policies against the same held-out fixtures and arrival schedule.
-5. Report acceptance only if validation found a feasible candidate and adaptive held-out performance passes both constraints with complete costs.
-6. Save configuration, dataset hash, methodology version, all request records, candidate results, model metadata (never keys), and spending.
-
-Eligibility uses point estimates, not the lower confidence bound. Test fixtures have distinct text references but share templates with validation, so the evaluation is not independent in the real-world generalization sense. The fixed policy order may bias live measurements under changing external load. The router is an interpretable heuristic, not a trained router or a continuously load-aware controller. Final latency is checked empirically; no SLO is guaranteed by routing.
-
-## Connect real models
-
-Use endpoints that accept `POST /v1/chat/completions`, JSON object output, `temperature`, and `max_tokens`, and return `usage.prompt_tokens` and `usage.completion_tokens`. Both endpoint URLs must include `/v1`. vLLM offers this API: [official server documentation](https://docs.vllm.ai/en/latest/serving/openai_compatible_server/).
-
-Set environment variables **before starting the server**. Replace the example model aliases with models served by your endpoints and prices with the applicable provider rates. `.env.example` is documentation; the app does not automatically load `.env` files.
+Download the pinned Bitext Customer Support dataset and create deterministic intent-stratified manifests:
 
 ```powershell
-$env:ECONOMY_BASE_URL = 'http://127.0.0.1:8000/v1'
-$env:ECONOMY_MODEL = 'your-economy-model'
-$env:ECONOMY_INPUT_PER_MILLION = '0.15'
-$env:ECONOMY_OUTPUT_PER_MILLION = '0.60'
-# If your provider requires authentication:
-# $env:ECONOMY_API_KEY = 'your-key'
-
-$env:STRONG_BASE_URL = 'http://127.0.0.1:8001/v1'
-$env:STRONG_MODEL = 'your-strong-model'
-$env:STRONG_INPUT_PER_MILLION = '2.50'
-$env:STRONG_OUTPUT_PER_MILLION = '10.00'
-# $env:STRONG_API_KEY = 'your-key'
-
-python -m lab.server
+python -m inferenceops.traces.bitext
 ```
 
-For local endpoints, omit all four `*_INPUT_PER_MILLION` and `*_OUTPUT_PER_MILLION` variables and set `ECONOMY_HOURLY_COST` and `STRONG_HOURLY_COST` to a positive GPU-hour rate. Cost is then measured request time × rate. Use concurrency 1 when interpreting this as occupied GPU time; concurrent request durations overlap and would otherwise double-count shared capacity. A value of `1.00` produces a transparent normalized dollar-per-GPU-hour comparison, not an electricity-bill claim.
+This prepares 270 validation and 540 held-out test cases plus a 135-item review queue under ignored `data/external/`. Labels are reported as **published dataset labels** until review is completed. See [data provenance](docs/data-provenance.md).
 
-Live mode makes **2 × validation requests + 3 × test requests**: 720 calls at the standard 120/160 configuration, with up to 150 output tokens requested per call. A 30-validation/20-test pilot uses 120 calls and has much wider statistical uncertainty. The UI requires deliberately selecting live mode. There are no automatic retries, cascades, or paid calls at startup. One benchmark job runs at a time. Do not shut down the server during a live run; partial jobs are not checkpointed, and provider charges may still occur.
+## Real models
 
-Calibration calls each tier once per validation fixture. Candidate latency is estimated by replaying measured service times through the client worker model; it is not a direct live measurement of each candidate. The three final test policies use real timed calls including client queueing. The HTTP timeout is 45 seconds. A timed-out provider call may still be billed; missing usage is marked unknown, not represented as verified zero cost. Calibration spending is separate from the three-policy benchmark total. JSON exports contain both.
+The Budget Lab supports any two endpoints implementing `POST /v1/chat/completions`. The intent benchmark evaluates economy-first confidence fallback against the Bitext task:
 
-Prices describe token billing only. For self-hosted deployments, add GPU rental × elapsed provisioned time, idle capacity, and shared infrastructure attribution before making infrastructure savings claims. Setting prices to zero cannot establish cost savings.
+```powershell
+python -m inferenceops.experiments.intent_benchmark --validation 30 --test 20
+```
+
+For local Ollama, use the [local run guide](docs/local-live-run.md). Hosted providers require explicit token prices, worst-case cost preflight, and a typed confirmation such as `RUN 5.00 USD`. API keys are never saved in SQLite or exports. No paid requests run at startup.
+
+Qwen3 models should use Ollama's native structured-output path so reasoning does not consume the JSON token allowance:
+
+```powershell
+$env:ECONOMY_BASE_URL='http://127.0.0.1:11434/v1'
+$env:ECONOMY_MODEL='qwen3:0.6b'
+$env:ECONOMY_HOURLY_COST='1'
+$env:ECONOMY_OLLAMA_THINK='false'
+$env:STRONG_BASE_URL='http://127.0.0.1:11434/v1'
+$env:STRONG_MODEL='qwen3:4b'
+$env:STRONG_HOURLY_COST='1'
+$env:STRONG_OLLAMA_THINK='false'
+python -m inferenceops.experiments.intent_benchmark --validation 10 --test 10
+```
+
+## External actions
+
+GitHub writes are restricted to `ArpithKagalkar/inferenceops-demo-support-service`. A workflow must pass and generate a preview before it can request a real draft PR. The connector verifies the branch, draft state, and exact two-file allowlist after creation. It cannot merge or deploy.
+
+The V1 proof repository is public at [inferenceops-demo-support-service](https://github.com/ArpithKagalkar/inferenceops-demo-support-service), and the verified automation artifact is [draft PR #1](https://github.com/ArpithKagalkar/inferenceops-demo-support-service/pull/1).
+
+Slack defaults to a persisted local outbox. A real webhook requires separate configuration and explicit delivery confirmation. Langfuse support is staged as a normalized export importer; direct account access is not enabled in V1.
 
 ## API
 
 | Route | Purpose |
 |---|---|
-| `GET /api/health` | Engine status and live configuration readiness |
-| `POST /api/runs` | Validate configuration and start a background run; returns job ID |
-| `GET /api/jobs/{id}` | Poll job status |
-| `GET /api/runs` | Latest 30 saved experiment summaries |
-| `GET /api/runs/{id}` | Complete experiment JSON |
-| `GET /api/runs/{id}/csv` | Request metrics for every policy |
+| `GET /api/health` | Runtime and provider readiness |
+| `POST /api/runs` | Start a simulation or confirmed live run |
+| `GET /api/jobs/{id}` | Poll a background run |
+| `GET /api/runs/{id}` | Complete experiment evidence |
+| `POST/GET /api/trace-batches` | Import and list trace batches |
+| `GET /api/summary` | Latest spend and workflow summary |
+| `POST /api/audits` | Run the deterministic detectors |
+| `GET /api/opportunities` | List explainable findings |
+| `POST /api/opportunities/{id}/experiments` | Run an eligible guarded simulation |
+| `GET /api/workflows/{id}` | Read state and immutable events |
+| `POST /api/workflows/{id}/pr-preview` | Generate an allowlisted change preview |
+| `POST /api/workflows/{id}/create-pr` | Create and verify a confirmed draft PR |
+| `POST /api/workflows/{id}/notify` | Stage or explicitly deliver a notification |
+| `POST /api/provider-preflight` | Estimate calls and maximum configured cost |
 
-Example POST body:
+## Evidence labels
 
-```json
-{"mode":"simulation","requests":160,"seed":42,"rps":4,"concurrency":8,"quality_min":0.9,"latency_slo_ms":1800,"traffic":"steady"}
-```
+- **Observed:** calculated from an imported trace window.
+- **Estimated:** detector potential, not experimentally verified.
+- **Simulated:** deterministic system evidence, not real-model performance.
+- **Live:** calls and latency measured against configured endpoints.
+- **Verified:** a candidate passed every configured constraint with complete accounting.
+
+InferenceOps V1 does not connect production traffic, merge pull requests, deploy changes, or perform rollback. A production claim requires independently reviewed labels, shadow traffic, a controlled canary, and monitored outcomes.
 
 ## Layout
 
 ```text
-lab/dataset.py      Synthetic fixtures, text difficulty, exact-match scorer
-lab/engine.py       Simulation, live adapter, load generator, policy calibration
-lab/server.py       Local HTTP API, background jobs, SQLite persistence
-lab/benchmark.py    Reproducible CLI benchmark
-web/               Dependency-free responsive dashboard
-tests/             Engine, validation, accounting, and mock provider tests
-docs/              Architecture and next experiments
-data/              Local database (ignored)
-outputs/           Exported benchmark artifacts (ignored)
+lab/                 Inference Budget Lab engine and legacy simulator
+inferenceops/        Traces, audits, experiments, workflows and connectors
+web/                 Framework-free responsive product dashboard
+tests/               Engine, API, detector, workflow and connector tests
+docs/                Architecture, provenance and verification evidence
+data/                Local SQLite and downloaded datasets (ignored)
+outputs/             Generated benchmark evidence (ignored)
 ```
 
-## Portfolio positioning
-
-The defensible MVP claim is: **“Built a reproducible LLM cost–quality–latency workbench with validation-calibrated model routing, load tests, request-level cost accounting, and live endpoint support.”**
-
-Only claim a measured percentage saving after real endpoint experiments. Include model versions, hardware/provider, date and prices, dataset provenance, quality confidence interval, request rate, concurrency, error rate, and SLO. Keep failed configurations in the report.
-
-## Next experiments
-
-1. Add independently labeled real tickets and domain-shift splits; retain a final untouched evaluation set.
-2. Benchmark two actual models across several seeds and randomized policy order.
-3. Add GPU-hour accounting and compare precision/quantization on the same device.
-4. Measure batch-size and prefix-cache configurations; capture vLLM metrics for TTFT, decode, queueing, and utilization.
-5. Replace the heuristic with a calibrated quality predictor, then evaluate load-aware routing and fallback costs.
-
-Reference: [RouteLLM research](https://arxiv.org/abs/2406.18665), [vLLM metrics](https://docs.vllm.ai/en/latest/design/metrics/).
-
-Local development application; no remote authentication, multi-user isolation, or production deployment hardening is included.
-
-See [the local Ollama run guide](docs/local-live-run.md) and [verification log](docs/verification.md) for the first measured GPU pilot and its limitations.
+See [InferenceOps architecture](docs/inferenceops-architecture.md) and the [verification log](docs/verification.md).

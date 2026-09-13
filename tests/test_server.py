@@ -77,8 +77,27 @@ class APITests(unittest.TestCase):
         with self.request('/api/health') as response:
             self.assertEqual(json.load(response)['status'],'ok')
         with self.request('/') as response:
-            self.assertIn(b'Inference Budget Lab',response.read())
+            self.assertIn(b'InferenceOps',response.read())
         with self.assertRaises(urllib.error.HTTPError) as caught:
             self.request('/.env')
         self.assertEqual(caught.exception.code,404)
         caught.exception.close()
+
+    def test_inferenceops_trace_audit_and_preview_workflow(self):
+        with self.request('/api/trace-batches',{'source':'demo','count':90,'seed':99}) as response:
+            batch=json.load(response)
+        with self.request('/api/audits',{'batch_id':batch['id']}) as response:
+            opportunities=json.load(response)
+        self.assertEqual({row['type'] for row in opportunities},
+                         {'oversized_model','repeated_prompt','excessive_rag'})
+        opportunity=next(row for row in opportunities if row['type']=='oversized_model')
+        with self.request(f"/api/opportunities/{opportunity['id']}/experiments",
+                          {'mode':'simulation','requests':20,'validation_requests':30}) as response:
+            workflow=json.load(response)
+        self.assertIn(workflow['state'],('VERIFIED','REJECTED'))
+        if workflow['state']=='VERIFIED':
+            with self.request(f"/api/workflows/{workflow['id']}/pr-preview",{}) as response:
+                previewed=json.load(response)
+            self.assertEqual(previewed['state'],'PR_PREVIEWED')
+            self.assertEqual(previewed['pr_preview']['repository'],
+                             'ArpithKagalkar/inferenceops-demo-support-service')

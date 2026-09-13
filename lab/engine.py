@@ -9,6 +9,7 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass, asdict
 from .dataset import CATEGORIES, FIELDS, PRODUCTS, URGENCIES, fixtures, difficulty, fingerprint, score
+from inferenceops.experiments.budget import BudgetLedger
 
 PROMPT_VERSION = '2.0'
 SYSTEM = ('Extract a support ticket as a JSON object with exactly product, category, urgency. '
@@ -31,13 +32,19 @@ class Config:
     quality_min: float = 0.9
     latency_slo_ms: float = 1800
     traffic: str = 'steady'
+    budget_cap: float | None = None
+    budget_currency: str = 'USD'
+    paid_confirmation: str = ''
+    estimated_input_tokens: int = 2000
+    max_output_tokens: int = 150
 
     @classmethod
     def parse(cls, value):
         if not isinstance(value, dict) or set(value) - set(cls.__dataclass_fields__):
             raise ValueError('Unknown configuration fields')
         cfg = cls(**value)
-        for key in ('requests', 'validation_requests', 'seed', 'concurrency'):
+        for key in ('requests', 'validation_requests', 'seed', 'concurrency',
+                    'estimated_input_tokens', 'max_output_tokens'):
             if type(getattr(cfg, key)) is not int:
                 raise ValueError(f'{key} must be an integer')
         for key in ('rps', 'quality_min', 'latency_slo_ms'):
@@ -49,10 +56,20 @@ class Config:
         if not (20 <= cfg.requests <= 500 and 20 <= cfg.validation_requests <= 500
                 and 1 <= cfg.concurrency <= 32 and 0.1 <= cfg.rps <= 50
                 and 0.5 <= cfg.quality_min <= 1 and 100 <= cfg.latency_slo_ms <= 60000
-                and 0 <= cfg.seed <= 999999):
+                and 0 <= cfg.seed <= 999999 and 1 <= cfg.estimated_input_tokens <= 1_000_000
+                and 1 <= cfg.max_output_tokens <= 100_000):
             raise ValueError('Configuration is outside supported limits')
         if cfg.mode == 'live' and not live_ready():
             raise ValueError('Live endpoints and explicit token prices must be configured on the server')
+        if cfg.mode == 'live' and paid_provider_run():
+            if (type(cfg.budget_cap) not in (int, float) or not math.isfinite(cfg.budget_cap)
+                    or not 0 < cfg.budget_cap <= 100):
+                raise ValueError('Paid live runs require a budget_cap between 0 and 100')
+            expected = f'RUN {cfg.budget_cap:.2f} {cfg.budget_currency}'
+            if cfg.paid_confirmation != expected:
+                raise ValueError(f'Paid live run requires confirmation: {expected}')
+            if maximum_scheduled_cost(cfg) > cfg.budget_cap:
+                raise ValueError('Worst-case provider cost exceeds the approved budget cap')
         return cfg
 
 def provider_config(tier):
@@ -62,7 +79,8 @@ def provider_config(tier):
             'input_price': os.getenv(f'{prefix}_INPUT_PER_MILLION'),
             'output_price': os.getenv(f'{prefix}_OUTPUT_PER_MILLION'),
             'hourly_cost': os.getenv(f'{prefix}_HOURLY_COST'),
-            'reasoning_effort': os.getenv(f'{prefix}_REASONING_EFFORT', '')}
+            'reasoning_effort': os.getenv(f'{prefix}_REASONING_EFFORT', ''),
+            'ollama_think': os.getenv(f'{prefix}_OLLAMA_THINK', '')}
 
 def cost_basis(provider):
     """Return token or compute billing when its required values are valid."""
@@ -89,6 +107,24 @@ def live_ready():
             return False
     return True
 
+def paid_provider_run():
+    return any(provider_config(tier)['base_url'].startswith('https://')
+               and cost_basis(provider_config(tier)) == 'tokens' for tier in ('economy', 'strong'))
+
+def reservation_for(tier, cfg):
+    provider = provider_config(tier)
+    if cost_basis(provider) != 'tokens':
+        return 0
+    return (cfg.estimated_input_tokens * float(provider['input_price'])
+            + cfg.max_output_tokens * float(provider['output_price'])) / 1_000_000
+
+def maximum_scheduled_cost(cfg):
+    # Live calibration calls both tiers once per validation row. The final benchmark
+    # calls strong, economy, and one selected tier per test row. Reserve the selected
+    # tier conservatively at the more expensive per-call value.
+    economy, strong = reservation_for('economy', cfg), reservation_for('strong', cfg)
+    return cfg.validation_requests * (economy + strong) + cfg.requests * (economy + strong + max(economy, strong))
+
 def model_for(policy, text, threshold):
     return ('economy' if difficulty(text) <= threshold else 'strong') if policy == 'adaptive' else policy
 
@@ -108,12 +144,12 @@ def simulated(row, tier, seed):
             'output_tokens': output_tokens, 'cost': (input_tokens * prices[0] + output_tokens * prices[1]) / 1e6,
             'error': None, 'cost_known': True}
 
-def live_call(row, tier):
+def live_call(row, tier, ledger=None, reservation=0, max_output_tokens=150):
     p = provider_config(tier)
     basis = cost_basis(p)
     payload = {'model': p['model'], 'messages': [{'role': 'system', 'content': SYSTEM},
                {'role': 'user', 'content': row['text']}], 'temperature': 0,
-               'max_tokens': 150, 'response_format': {'type': 'json_schema', 'json_schema': {
+               'max_tokens': max_output_tokens, 'response_format': {'type': 'json_schema', 'json_schema': {
                    'name': 'support_ticket', 'strict': True, 'schema': {'type': 'object',
                    'properties': {'product': {'type': 'string', 'enum': list(PRODUCTS)},
                                   'category': {'type': 'string', 'enum': list(CATEGORIES)},
@@ -129,6 +165,8 @@ def live_call(row, tier):
     start = time.perf_counter()
     result = {'output': {}, 'cost': 0, 'input_tokens': 0, 'output_tokens': 0,
               'error': None, 'cost_known': False, 'cost_basis': basis}
+    if ledger and reservation:
+        ledger.reserve(reservation)
     try:
         with urllib.request.urlopen(request, timeout=45) as response:
             data = json.load(response)
@@ -151,6 +189,9 @@ def live_call(row, tier):
     if basis == 'compute_time':
         result['cost_known'] = True
         result['cost'] = result['service_ms'] / 3_600_000 * float(p['hourly_cost'])
+    if ledger and reservation:
+        # Missing usage may still be billed, so retain the full reservation as spent.
+        ledger.settle(reservation, result['cost'] if result['cost_known'] else reservation)
     return result
 
 def percentile(values, q):
@@ -177,7 +218,7 @@ def arrival_times(count, cfg):
     first = times[0]
     return [t-first for t in times]
 
-def evaluate(rows, policy, threshold, cfg, progress=None):
+def evaluate(rows, policy, threshold, cfg, progress=None, ledger=None):
     arrivals = arrival_times(len(rows), cfg)
     records = []
     def record(row, tier, result, arrival, queue_ms):
@@ -197,7 +238,8 @@ def evaluate(rows, policy, threshold, cfg, progress=None):
         def execute(row, arrival):
             queue_ms = max(0, (time.perf_counter()-start)*1000-arrival)
             tier = model_for(policy, row['text'], threshold)
-            return record(row, tier, live_call(row, tier), arrival, queue_ms)
+            return record(row, tier, live_call(row, tier, ledger, reservation_for(tier, cfg), cfg.max_output_tokens),
+                          arrival, queue_ms)
         with concurrent.futures.ThreadPoolExecutor(max_workers=cfg.concurrency) as pool:
             pending = []
             for row, arrival in zip(rows, arrivals):
@@ -242,9 +284,10 @@ def run_experiment(cfg, update=lambda message: None):
     # Live calibration calls each model once per fixture. Candidate quality/cost use these
     # responses; latency is a replay estimate, not a second measured live benchmark.
     cached = {}
+    ledger = BudgetLedger(cfg.budget_cap, cfg.budget_currency) if cfg.mode == 'live' and paid_provider_run() else None
     if cfg.mode == 'live':
         for tier in ('economy', 'strong'):
-            _, records = evaluate(validation, tier, 0, cfg)
+            _, records = evaluate(validation, tier, 0, cfg, ledger=ledger)
             cached[tier] = records
             calibration_cost += sum(r['cost'] for r in records)
             calibration_cost_known &= all(r['cost_known'] for r in records)
@@ -268,7 +311,7 @@ def run_experiment(cfg, update=lambda message: None):
     results = []
     for policy, name in POLICIES:
         update(f'Benchmarking {name} on {cfg.requests} held-out fixtures')
-        metrics, records = evaluate(test, policy, selected['threshold'], cfg)
+        metrics, records = evaluate(test, policy, selected['threshold'], cfg, ledger=ledger)
         results.append({'id': policy, 'name': name, 'metrics': metrics, 'records': records})
     baseline = results[0]['metrics']['cost_per_1k']
     baseline_known = results[0]['metrics']['cost_known']
@@ -276,7 +319,9 @@ def run_experiment(cfg, update=lambda message: None):
         result['metrics']['savings'] = (1-result['metrics']['cost_per_1k']/baseline
                                         if baseline and baseline_known and result['metrics']['cost_known'] else None)
     adaptive = results[2]['metrics']
-    return {'config': asdict(cfg), 'results': results, 'calibration': candidates,
+    saved_config = asdict(cfg)
+    saved_config['paid_confirmation'] = '[confirmed]' if cfg.paid_confirmation else ''
+    return {'config': saved_config, 'results': results, 'calibration': candidates,
             'threshold': selected['threshold'], 'validation_feasible': bool(eligible),
             'accepted': bool(eligible) and adaptive['feasible'] and adaptive['cost_known'],
             'calibration_cost': calibration_cost, 'calibration_cost_known': calibration_cost_known,
@@ -286,4 +331,6 @@ def run_experiment(cfg, update=lambda message: None):
             'providers': {tier: {**{k:v for k,v in provider_config(tier).items() if k != 'key'},
                                  'cost_basis': cost_basis(provider_config(tier))}
                           for tier in ('economy','strong')} if cfg.mode == 'live' else {},
-            'methodology_version': '1.1', 'prompt_version': PROMPT_VERSION}
+            'budget': ({'cap': ledger.cap, 'currency': ledger.currency, 'spent': ledger.spent,
+                        'remaining': ledger.remaining} if ledger else None),
+            'methodology_version': '1.2', 'prompt_version': PROMPT_VERSION}

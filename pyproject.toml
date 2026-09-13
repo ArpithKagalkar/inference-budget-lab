@@ -1,6 +1,6 @@
 [project]
-name = "inference-budget-lab"
-version = "0.1.0"
-description = "LLM cost optimization under quality and latency constraints"
+name = "inferenceops"
+version = "0.2.0"
+description = "Evidence-first AI FinOps and LLM inference optimization workbench"
 requires-python = ">=3.10"
 dependencies = []

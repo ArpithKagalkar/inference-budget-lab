@@ -54,3 +54,37 @@ Prompt v2 pilot `85b89ba9de85` used Qwen3 0.6B and 4B through Ollama on an RTX 4
 | Adaptive fallback | 95% | 76%–99% | 6,250 ms | $0.201 | No |
 
 No validation candidate met both constraints. Strong-only validation reached 86.7% exact match with 7,309 ms p95, so the router correctly fell back and marked the experiment unaccepted. This result shows that the 4B local model/hardware pair is insufficient for the selected 90%/5-second operating point. The 20-request test interval is wide; it is a compatibility pilot, not a final portfolio claim.
+
+## InferenceOps V1 verification — 2026-09-13
+
+No paid model requests, production data connections, merges, deployments, or real Slack deliveries were made.
+
+### Automated and data checks
+
+`python -m unittest discover -s tests -v`: **27 tests passed**. The additional coverage includes normalized trace validation and duplicate rejection; all three detectors; generic task scoring; confidence fallback and combined-call accounting; deterministic Bitext stratification and validation/test separation; hosted confirmation and worst-case budget refusal; version-1 SQLite migration; workflow transition rules; staged notification labeling; GitHub allowlisting and PR idempotency; and the complete orchestration API path.
+
+`node --check web/app.js`: passed.
+
+The pinned Bitext source downloaded successfully: revision `430d1a89bd93bd1fa23c16f29dd53e73f0087443`, SHA-256 `6f81102b0100b97b8468eb04368033a23206bf1fde9d53500d5806ec1001a434`. The generated manifests contain 270 validation cases, 540 held-out test cases, and 135 pending-review examples. Their labels remain explicitly identified as published dataset labels.
+
+### Local Ollama integration gate
+
+The Bitext integration pilot used 10 fixed validation and 10 fixed held-out cases with Qwen3 0.6B as economy and Qwen3 4B as strong. Ollama's native structured-output endpoint ran with thinking disabled and a normalized $1/GPU-hour comparison rate. Both tiers returned 100% schema-valid responses with zero request errors.
+
+| Policy | Exact match | p95 latency | Normalized cost / 1k | Accepted |
+|---|---:|---:|---:|---:|
+| Always strong (4B) | 20% | 1,137 ms | $0.289 | No |
+| Always economy (0.6B) | 20% | 625 ms | $0.141 | No |
+| Economy with fallback | 20% | 625 ms | $0.141 | No |
+
+The candidate was correctly rejected because it missed even the temporary 50% pilot quality floor. The apparent 51.3% cost difference is not a verified saving. The small sample is an adapter/integration check, not a statistical model comparison; the full 270/540 replay and manual label review remain necessary before making a quality claim.
+
+### GitHub and staged notification proof
+
+The public sandbox repository is [ArpithKagalkar/inferenceops-demo-support-service](https://github.com/ArpithKagalkar/inferenceops-demo-support-service). Workflow `dcc85333137a` created and read back [draft PR #1](https://github.com/ArpithKagalkar/inferenceops-demo-support-service/pull/1) from branch `inferenceops/optimization-dcc85333137a`. Verification confirmed draft state and an exact two-file change set: `config/inference-policy.json` and `evidence/dcc85333137a.json`. The evidence file labels the source experiment as simulation. The follow-up Slack-equivalent message was stored as staged local outbox evidence and never represented as delivered.
+
+### Browser checks
+
+Playwright verified the Overview, Opportunities, Experiment Lab, Workflows, and Request Explorer flows in Chromium. A new 80-request simulation completed and rendered its evidence. Desktop 1440×1100 and mobile 390×844 were inspected; at mobile width the document measured 375 pixels inside a 390-pixel viewport, so no horizontal overflow was present. Final browser console: **0 errors, 0 warnings**.
+
+Screenshots are stored in ignored local evidence at `output/playwright/inferenceops-overview-desktop.png`, `output/playwright/inferenceops-workflow-desktop.png`, and `output/playwright/inferenceops-mobile.png`.
